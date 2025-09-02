@@ -78,11 +78,7 @@
       return {vb, w, h};
     }
 
-    function parseVB(vb){
-      if(!vb) return null;
-      const a = vb.trim().split(/\s+/).map(Number);
-      return {x:a[0], y:a[1], w:a[2], h:a[3]};
-    }
+    function parseVB(vb){ if(!vb) return null; const a = vb.trim().split(/\s+/).map(Number); return {x:a[0], y:a[1], w:a[2], h:a[3]}; }
 
     let baseInfo, plInfo;
     try{
@@ -109,19 +105,21 @@
       gPL.attr('transform', `translate(${tx},${ty}) scale(${sx},${sy})`);
     }
 
-    // Select shapes & text
-    const shapes = gPL.selectAll('path, polygon, rect, circle, ellipse');
-    const texts  = gPL.selectAll('text');
+    // --- IMPORTANT FIXES ---
+    // 1) Neutralize any background rectangles in the parks+labels file so they don't cover the map
+    gPL.selectAll('rect').attr('fill','none').attr('pointer-events','none');
+
+    // 2) Only treat PATH and POLYGON as park shapes (ignore rect/circle/ellipse)
+    const shapes = gPL.selectAll('path, polygon');
 
     // Strip inline fills/strokes so CSS applies
-    shapes.each(function(){
-      this.removeAttribute('fill');
-      this.removeAttribute('stroke');
-    });
+    shapes.each(function(){ this.removeAttribute('fill'); this.removeAttribute('stroke'); });
     shapes.classed('park', true).attr('tabindex', 0).attr('role','button');
-    texts.classed('label', true).attr('pointer-events','none');
 
-    // Bring labels to the front so they're drawn on top of polygons
+    // Labels are any <text> already in the parks+labels SVG
+    const texts  = gPL.selectAll('text').classed('label', true).attr('pointer-events','none');
+
+    // Bring labels to the front so they draw on top of polygons
     texts.each(function(){ this.parentNode.appendChild(this); });
 
     // Ensure label ids
@@ -132,20 +130,15 @@
 
     function shapeName(el){
       const titleEl = el.querySelector && el.querySelector('title');
-      // Try a few name sources
       return (el.getAttribute('data-name') || (titleEl && titleEl.textContent) || el.id || '').trim();
     }
-    function labelName(n){
-      return (n.textContent || '').trim();
-    }
+    function labelName(n){ return (n.textContent || '').trim(); }
 
-    // Precompute label centers in *screen* coords (for robust matching)
     const svgEl = svg.node();
     function centerInScreen(el){
       const bb = el.getBBox();
       const local = svgEl.createSVGPoint();
-      local.x = bb.x + bb.width/2;
-      local.y = bb.y + bb.height/2;
+      local.x = bb.x + bb.width/2; local.y = bb.y + bb.height/2;
       const ctm = el.getCTM();
       return ctm ? local.matrixTransform(ctm) : local;
     }
@@ -158,21 +151,15 @@
       screen: centerInScreen(n)
     }));
 
-    // Helper to test containment using isPointInFill (where supported)
     function labelInsideShape(labelScreenPt, shapeEl){
       if(typeof shapeEl.isPointInFill !== 'function') return false;
-      const pt = svgEl.createSVGPoint();
-      pt.x = labelScreenPt.x;
-      pt.y = labelScreenPt.y;
+      const pt = svgEl.createSVGPoint(); pt.x = labelScreenPt.x; pt.y = labelScreenPt.y;
       const inv = shapeEl.getCTM() && shapeEl.getCTM().inverse();
       if(!inv) return false;
       const local = pt.matrixTransform(inv);
-      try{
-        return shapeEl.isPointInFill(local);
-      }catch(e){ return false; }
+      try{ return shapeEl.isPointInFill(local); } catch(e){ return false; }
     }
 
-    // Build a quick map for name-based matches
     const labelByKey = new Map();
     labelNodes.forEach(L => { if(L.key) labelByKey.set(L.key, L); });
 
@@ -184,23 +171,12 @@
         el.setAttribute('data-label-id', labelByKey.get(key).id);
         return;
       }
-      // Inside test
       let bestInside = null;
-      for(const L of labelNodes){
-        if(labelInsideShape(L.screen, el)){ bestInside = L; break; }
-      }
-      if(bestInside){
-        el.setAttribute('data-label-id', bestInside.id);
-        return;
-      }
-      // Nearest by distance in screen space
+      for(const L of labelNodes){ if(labelInsideShape(L.screen, el)){ bestInside = L; break; } }
+      if(bestInside){ el.setAttribute('data-label-id', bestInside.id); return; }
       const center = centerInScreen(el);
       let best = null, bestD = Infinity;
-      for(const L of labelNodes){
-        const dx = L.screen.x - center.x, dy = L.screen.y - center.y;
-        const d2 = dx*dx + dy*dy;
-        if(d2 < bestD){ bestD = d2; best = L; }
-      }
+      for(const L of labelNodes){ const dx = L.screen.x - center.x, dy = L.screen.y - center.y; const d2 = dx*dx + dy*dy; if(d2 < bestD){ bestD = d2; best = L; } }
       if(best){ el.setAttribute('data-label-id', best.id); }
     });
 
@@ -213,32 +189,21 @@
     }
 
     shapes.on('click', (event)=> togglePark(event.currentTarget));
-    shapes.on('keydown', (event)=>{
-      if(event.key === 'Enter' || event.key === ' '){
-        event.preventDefault();
-        togglePark(event.currentTarget);
-      }
-    });
+    shapes.on('keydown', (event)=>{ if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); togglePark(event.currentTarget); } });
 
-    // Zoom/pan (1x–4x)
-    const zoom = d3.zoom().scaleExtent([1,4]).on('zoom', (event)=>{
-      viewport.attr('transform', event.transform);
-    });
+    const zoom = d3.zoom().scaleExtent([1,4]).on('zoom', (event)=>{ viewport.attr('transform', event.transform); });
     svg.call(zoom);
 
-    // Reset zoom and selections
     resetBtn.addEventListener('click', ()=>{
       svg.transition().duration(250).call(zoom.transform, d3.zoomIdentity);
       d3.selectAll('.park.active').classed('active', false);
       d3.selectAll('text.label.active').classed('active', false);
     });
 
-    // Double-click to zoom to a shape
     shapes.on('dblclick', (event)=>{
       event.preventDefault();
-      const node = event.currentTarget;
-      const bbox = node.getBBox();
-      const {width, height} = svgEl.getBoundingClientRect();
+      const node = event.currentTarget; const bbox = node.getBBox();
+      const {width, height} = svg.node().getBoundingClientRect();
       const scale = Math.min(4, Math.max(1, Math.min(width / (bbox.width * 1.5), height / (bbox.height * 1.5))));
       const tx = width/2 - scale * (bbox.x + bbox.width/2);
       const ty = height/2 - scale * (bbox.y + bbox.height/2);
