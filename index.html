@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Norway National Parks — Two SVGs (basemap + parks+labels)</title>
+  <style>
+    :root{
+      --bg:#f8f9fb;
+      --park:#b0b7c3;        /* default gray */
+      --park-active:#2bb673; /* green when selected */
+      --label:#6b7280;       /* default label gray */
+      --label-active:#1f2937;/* darker when active */
+      --stroke:#9aa4b2;      /* park stroke */
+    }
+    html, body {height:100%;}
+    body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; background:var(--bg); color:#0f172a; display:grid; grid-template-rows:auto 1fr; }
+    header { padding:12px 16px; border-bottom:1px solid #e5e7eb; background:#fff; display:flex; gap:12px; align-items:center; }
+    header h1 { font-size:clamp(16px,2.2vw,20px); margin:0; font-weight:650; }
+    .toolbar { margin-left:auto; display:flex; gap:8px; }
+    button{ appearance:none; border:1px solid #e5e7eb; background:#fff; padding:8px 10px; border-radius:10px; cursor:pointer }
+    .map-wrap{ position:relative; overflow:hidden; background:#e9eef5; }
+    svg{ display:block; width:100%; height:100%; }
+
+    /* Basemap non-interactive so clicks go to parks */
+    #basemap, #basemap * { pointer-events:none; }
+
+    /* Park shapes */
+    .park { fill: var(--park); stroke: var(--stroke); stroke-width: 0.7; cursor:pointer; transition: fill .15s ease; }
+    .park.active { fill: var(--park-active); }
+
+    /* Labels */
+    .label { font-size: 10px; fill: var(--label); pointer-events: none; transition: font-weight .15s ease, fill .15s ease; }
+    .label.active { font-weight: 700; fill: var(--label-active); }
+
+    @media (max-width: 480px){ .label{ font-size: 9px; } }
+    .park:focus { outline: none; filter: drop-shadow(0 0 0.6px #1118); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Norway National Parks — External SVG (basemap + parks with labels)</h1>
+    <div class="toolbar">
+      <button id="resetBtn" title="Reset zoom">Reset</button>
+    </div>
+  </header>
+  <div class="map-wrap">
+    <!-- Put index.html, basemap.svg, national_parks_lable.svg in the SAME folder -->
+    <svg id="map" viewBox="0 0 1000 1600" role="img" aria-label="Interactive map of Norway with national parks (two external SVGs)">
+      <g id="viewport">
+        <g id="basemap"></g>
+        <g id="parksAndLabels"></g>
+      </g>
+    </svg>
+  </div>
+
+  <script src="https://unpkg.com/d3@7/dist/d3.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script>
+  (async function(){
+    const svg = d3.select('#map');
+    const viewport = d3.select('#viewport');
+    const gBase = d3.select('#basemap');
+    const gPL = d3.select('#parksAndLabels');
+    const resetBtn = document.getElementById('resetBtn');
+
+    async function loadSVG(url, target){
+      const resp = await fetch(url);
+      if(!resp.ok) throw new Error(url + ' ' + resp.status);
+      const text = await resp.text();
+      const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+      const srcSvg = doc.documentElement; // <svg>
+      const frag = document.createDocumentFragment();
+      Array.from(srcSvg.childNodes).forEach(n => frag.appendChild(document.importNode(n, true)));
+      target.node().appendChild(frag);
+      const vb = srcSvg.getAttribute('viewBox');
+      const w = srcSvg.getAttribute('width');
+      const h = srcSvg.getAttribute('height');
+      return {vb, w, h};
+    }
+
+    function parseVB(vb){
+      if(!vb) return null;
+      const a = vb.trim().split(/\s+/).map(Number);
+      return {x:a[0], y:a[1], w:a[2], h:a[3]};
+    }
+
+    let baseInfo, plInfo;
+    try{
+      baseInfo = await loadSVG('basemap.svg', gBase);
+      plInfo   = await loadSVG('national_parks_lable.svg', gPL);
+    } catch(e){
+      console.error(e);
+      alert('Could not load basemap.svg or national_parks_lable.svg. Use a local server (python -m http.server).');
+      return;
+    }
+
+    const vbBase = parseVB(baseInfo.vb);
+    const vbPL   = parseVB(plInfo.vb);
+
+    // Root viewBox follows basemap
+    if(vbBase){ svg.attr('viewBox', `${vbBase.x} ${vbBase.y} ${vbBase.w} ${vbBase.h}`); }
+
+    // Align parks/labels group to basemap
+    if(vbBase && vbPL){
+      const sx = vbBase.w / vbPL.w;
+      const sy = vbBase.h / vbPL.h;
+      const tx = vbBase.x - vbPL.x * sx;
+      const ty = vbBase.y - vbPL.y * sy;
+      gPL.attr('transform', `translate(${tx},${ty}) scale(${sx},${sy})`);
+    }
+
+    // Select shapes & text
+    const shapes = gPL.selectAll('path, polygon, rect, circle, ellipse');
+    const texts  = gPL.selectAll('text');
+
+    // Strip inline fills/strokes so CSS applies
+    shapes.each(function(){
+      this.removeAttribute('fill');
+      this.removeAttribute('stroke');
+    });
+    shapes.classed('park', true).attr('tabindex', 0).attr('role','button');
+    texts.classed('label', true).attr('pointer-events','none');
+
+    // Bring labels to the front so they're drawn on top of polygons
+    texts.each(function(){ this.parentNode.appendChild(this); });
+
+    // Ensure label ids
+    texts.each(function(_, i){ if(!this.id) this.id = 'label-' + (i+1); });
+
+    const norm = (s) => (s || '').toString().toLowerCase()
+      .normalize('NFD').replace(/\p{Diacritic}/gu,'').replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
+
+    function shapeName(el){
+      const titleEl = el.querySelector && el.querySelector('title');
+      // Try a few name sources
+      return (el.getAttribute('data-name') || (titleEl && titleEl.textContent) || el.id || '').trim();
+    }
+    function labelName(n){
+      return (n.textContent || '').trim();
+    }
+
+    // Precompute label centers in *screen* coords (for robust matching)
+    const svgEl = svg.node();
+    function centerInScreen(el){
+      const bb = el.getBBox();
+      const local = svgEl.createSVGPoint();
+      local.x = bb.x + bb.width/2;
+      local.y = bb.y + bb.height/2;
+      const ctm = el.getCTM();
+      return ctm ? local.matrixTransform(ctm) : local;
+    }
+
+    const labelNodes = texts.nodes().map(n => ({
+      n,
+      id: n.id,
+      name: labelName(n),
+      key: norm(labelName(n)),
+      screen: centerInScreen(n)
+    }));
+
+    // Helper to test containment using isPointInFill (where supported)
+    function labelInsideShape(labelScreenPt, shapeEl){
+      if(typeof shapeEl.isPointInFill !== 'function') return false;
+      const pt = svgEl.createSVGPoint();
+      pt.x = labelScreenPt.x;
+      pt.y = labelScreenPt.y;
+      const inv = shapeEl.getCTM() && shapeEl.getCTM().inverse();
+      if(!inv) return false;
+      const local = pt.matrixTransform(inv);
+      try{
+        return shapeEl.isPointInFill(local);
+      }catch(e){ return false; }
+    }
+
+    // Build a quick map for name-based matches
+    const labelByKey = new Map();
+    labelNodes.forEach(L => { if(L.key) labelByKey.set(L.key, L); });
+
+    // Pair each shape with a label: (1) name match, (2) label inside shape, (3) nearest
+    shapes.each(function(){
+      const el = this;
+      const key = norm(shapeName(el));
+      if(key && labelByKey.has(key)){
+        el.setAttribute('data-label-id', labelByKey.get(key).id);
+        return;
+      }
+      // Inside test
+      let bestInside = null;
+      for(const L of labelNodes){
+        if(labelInsideShape(L.screen, el)){ bestInside = L; break; }
+      }
+      if(bestInside){
+        el.setAttribute('data-label-id', bestInside.id);
+        return;
+      }
+      // Nearest by distance in screen space
+      const center = centerInScreen(el);
+      let best = null, bestD = Infinity;
+      for(const L of labelNodes){
+        const dx = L.screen.x - center.x, dy = L.screen.y - center.y;
+        const d2 = dx*dx + dy*dy;
+        if(d2 < bestD){ bestD = d2; best = L; }
+      }
+      if(best){ el.setAttribute('data-label-id', best.id); }
+    });
+
+    function togglePark(el){
+      const park = d3.select(el);
+      const label = d3.select('#' + park.attr('data-label-id'));
+      const isActive = park.classed('active');
+      park.classed('active', !isActive);
+      label.classed('active', !isActive);
+    }
+
+    shapes.on('click', (event)=> togglePark(event.currentTarget));
+    shapes.on('keydown', (event)=>{
+      if(event.key === 'Enter' || event.key === ' '){
+        event.preventDefault();
+        togglePark(event.currentTarget);
+      }
+    });
+
+    // Zoom/pan (1x–4x)
+    const zoom = d3.zoom().scaleExtent([1,4]).on('zoom', (event)=>{
+      viewport.attr('transform', event.transform);
+    });
+    svg.call(zoom);
+
+    // Reset zoom and selections
+    resetBtn.addEventListener('click', ()=>{
+      svg.transition().duration(250).call(zoom.transform, d3.zoomIdentity);
+      d3.selectAll('.park.active').classed('active', false);
+      d3.selectAll('text.label.active').classed('active', false);
+    });
+
+    // Double-click to zoom to a shape
+    shapes.on('dblclick', (event)=>{
+      event.preventDefault();
+      const node = event.currentTarget;
+      const bbox = node.getBBox();
+      const {width, height} = svgEl.getBoundingClientRect();
+      const scale = Math.min(4, Math.max(1, Math.min(width / (bbox.width * 1.5), height / (bbox.height * 1.5))));
+      const tx = width/2 - scale * (bbox.x + bbox.width/2);
+      const ty = height/2 - scale * (bbox.y + bbox.height/2);
+      const t = d3.zoomIdentity.translate(tx, ty).scale(scale);
+      svg.transition().duration(350).call(zoom.transform, t);
+    });
+  })();
+  </script>
+</body>
+</html>
