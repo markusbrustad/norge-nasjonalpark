@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Norway National Parks — Two SVGs (basemap + parks+labels)</title>
+  <title>Norway National Parks — Two SVGs (Leader-Line Pairing)</title>
   <style>
     :root{
       --bg:#f8f9fb;
@@ -39,7 +39,7 @@
 </head>
 <body>
   <header>
-    <h1>Norway National Parks — External SVG (basemap + parks with labels)</h1>
+    <h1>Norway National Parks — External SVG (Leader-Line Pairing)</h1>
     <div class="toolbar">
       <button id="resetBtn" title="Reset zoom">Reset</button>
     </div>
@@ -105,81 +105,127 @@
       gPL.attr('transform', `translate(${tx},${ty}) scale(${sx},${sy})`);
     }
 
-    // --- IMPORTANT FIXES ---
-    // 1) Neutralize any background rectangles in the parks+labels file so they don't cover the map
+    // --- CLEANUP ---
+    // Neutralize any background rectangles so they don't cover the map
     gPL.selectAll('rect').attr('fill','none').attr('pointer-events','none');
 
-    // 2) Only treat PATH and POLYGON as park shapes (ignore rect/circle/ellipse)
-    const shapes = gPL.selectAll('path, polygon');
+    // Parks: only PATH + POLYGON
+    const parksSel = gPL.selectAll('path, polygon');
+    parksSel.each(function(){ this.removeAttribute('fill'); this.removeAttribute('stroke'); });
+    parksSel.classed('park', true).attr('tabindex', 0).attr('role','button');
 
-    // Strip inline fills/strokes so CSS applies
-    shapes.each(function(){ this.removeAttribute('fill'); this.removeAttribute('stroke'); });
-    shapes.classed('park', true).attr('tabindex', 0).attr('role','button');
-
-    // Labels are any <text> already in the parks+labels SVG
-    const texts  = gPL.selectAll('text').classed('label', true).attr('pointer-events','none');
-
-    // Bring labels to the front so they draw on top of polygons
-    texts.each(function(){ this.parentNode.appendChild(this); });
-
-    // Ensure label ids
-    texts.each(function(_, i){ if(!this.id) this.id = 'label-' + (i+1); });
-
-    const norm = (s) => (s || '').toString().toLowerCase()
-      .normalize('NFD').replace(/\p{Diacritic}/gu,'').replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
-
-    function shapeName(el){
-      const titleEl = el.querySelector && el.querySelector('title');
-      return (el.getAttribute('data-name') || (titleEl && titleEl.textContent) || el.id || '').trim();
-    }
-    function labelName(n){ return (n.textContent || '').trim(); }
+    // Labels: any <text>
+    const labelsSel  = gPL.selectAll('text').classed('label', true).attr('pointer-events','none');
+    labelsSel.each(function(){ this.parentNode.appendChild(this); }); // bring to front
+    labelsSel.each(function(_, i){ if(!this.id) this.id = 'label-' + (i+1); });
 
     const svgEl = svg.node();
-    function centerInScreen(el){
-      const bb = el.getBBox();
-      const local = svgEl.createSVGPoint();
-      local.x = bb.x + bb.width/2; local.y = bb.y + bb.height/2;
-      const ctm = el.getCTM();
-      return ctm ? local.matrixTransform(ctm) : local;
-    }
+    const toScreen = (el, pt) => {
+      const p = svgEl.createSVGPoint(); p.x = pt.x; p.y = pt.y; const ctm = el.getCTM(); return ctm ? p.matrixTransform(ctm) : p; };
+    const centerInScreen = (el) => { const bb = el.getBBox(); return toScreen(el, {x: bb.x + bb.width/2, y: bb.y + bb.height/2}); };
 
-    const labelNodes = texts.nodes().map(n => ({
-      n,
-      id: n.id,
-      name: labelName(n),
-      key: norm(labelName(n)),
-      screen: centerInScreen(n)
-    }));
+    const labelNodes = labelsSel.nodes().map(n => {
+      const bb = n.getBBox();
+      const center = toScreen(n, {x: bb.x + bb.width/2, y: bb.y + bb.height/2});
+      return { id: n.id, node: n, screen: center };
+    });
 
-    function labelInsideShape(labelScreenPt, shapeEl){
-      if(typeof shapeEl.isPointInFill !== 'function') return false;
-      const pt = svgEl.createSVGPoint(); pt.x = labelScreenPt.x; pt.y = labelScreenPt.y;
-      const inv = shapeEl.getCTM() && shapeEl.getCTM().inverse();
-      if(!inv) return false;
-      const local = pt.matrixTransform(inv);
-      try{ return shapeEl.isPointInFill(local); } catch(e){ return false; }
-    }
+    // --- LEADER LINE PAIRING ---
+    // Leaders can be <line>, <polyline>, or stroke-only <path> that are NOT park polygons.
+    const parkNodeSet = new Set(parksSel.nodes());
+    const leaderCand = gPL.selectAll('line, polyline, path').filter(function(){ return !parkNodeSet.has(this); });
 
-    const labelByKey = new Map();
-    labelNodes.forEach(L => { if(L.key) labelByKey.set(L.key, L); });
-
-    // Pair each shape with a label: (1) name match, (2) label inside shape, (3) nearest
-    shapes.each(function(){
-      const el = this;
-      const key = norm(shapeName(el));
-      if(key && labelByKey.has(key)){
-        el.setAttribute('data-label-id', labelByKey.get(key).id);
-        return;
+    function getEndpointsLocal(el){
+      const tag = el.tagName.toLowerCase();
+      if(tag === 'line'){
+        const x1 = +el.getAttribute('x1') || 0, y1 = +el.getAttribute('y1') || 0;
+        const x2 = +el.getAttribute('x2') || 0, y2 = +el.getAttribute('y2') || 0;
+        return [{x:x1,y:y1},{x:x2,y:y2}];
       }
-      let bestInside = null;
-      for(const L of labelNodes){ if(labelInsideShape(L.screen, el)){ bestInside = L; break; } }
-      if(bestInside){ el.setAttribute('data-label-id', bestInside.id); return; }
-      const center = centerInScreen(el);
+      if(tag === 'polyline'){
+        const pts = (el.getAttribute('points') || '').trim().split(/\s+/).map(p=>p.split(',').map(Number)).filter(a=>a.length===2);
+        if(pts.length >= 2){ return [{x:pts[0][0], y:pts[0][1]}, {x:pts[pts.length-1][0], y:pts[pts.length-1][1]}]; }
+        return null;
+      }
+      if(tag === 'path'){
+        // Treat stroke-only paths as leaders (skip if they have fill other than none)
+        const fill = (el.getAttribute('fill') || '').toLowerCase();
+        if(fill && fill !== 'none') return null;
+        try{
+          const L = el.getTotalLength();
+          const p0 = el.getPointAtLength(0); const p1 = el.getPointAtLength(Math.max(0, L));
+          return [{x:p0.x, y:p0.y}, {x:p1.x, y:p1.y}];
+        }catch(e){ return null; }
+      }
+      return null;
+    }
+
+    const leaders = [];
+    leaderCand.nodes().forEach(el => {
+      const ends = getEndpointsLocal(el);
+      if(!ends) return;
+      const endsScreen = ends.map(pt => toScreen(el, pt));
+      // Find nearest label to either endpoint
+      let bestLabel = null, bestD = Infinity, bestEndIdx = 0;
+      for(const L of labelNodes){
+        for(let i=0;i<endsScreen.length;i++){
+          const dx = L.screen.x - endsScreen[i].x; const dy = L.screen.y - endsScreen[i].y; const d2 = dx*dx + dy*dy;
+          if(d2 < bestD){ bestD = d2; bestLabel = L; bestEndIdx = i; }
+        }
+      }
+      if(bestLabel){
+        leaders.push({ el, labelId: bestLabel.id, labelEnd: endsScreen[bestEndIdx], parkEnd: endsScreen[bestEndIdx ? 0 : 1] });
+      }
+    });
+
+    // If no leaders found, we'll fall back later
+
+    // Pair each park to the nearest leader's park-end, then inherit that leader's label
+    parksSel.each(function(){
+      const el = this;
+      // Respect pre-linked shapes
+      if(el.hasAttribute('data-label-id')) return;
+      const pc = centerInScreen(el);
       let best = null, bestD = Infinity;
-      for(const L of labelNodes){ const dx = L.screen.x - center.x, dy = L.screen.y - center.y; const d2 = dx*dx + dy*dy; if(d2 < bestD){ bestD = d2; best = L; } }
+      for(const L of leaders){
+        const dx = L.parkEnd.x - pc.x; const dy = L.parkEnd.y - pc.y; const d2 = dx*dx + dy*dy;
+        if(d2 < bestD){ bestD = d2; best = L; }
+      }
+      if(best){ el.setAttribute('data-label-id', best.labelId); }
+    });
+
+    // --- FALLBACKS (if some parks still have no label) ---
+    function labelInsideShape(labelPt, shapeEl){
+      if(typeof shapeEl.isPointInFill !== 'function') return false;
+      const pt = svgEl.createSVGPoint(); pt.x = labelPt.x; pt.y = labelPt.y;
+      const inv = shapeEl.getCTM() && shapeEl.getCTM().inverse(); if(!inv) return false;
+      const local = pt.matrixTransform(inv);
+      try{ return shapeEl.isPointInFill(local); }catch(e){ return false; }
+    }
+
+    parksSel.each(function(){
+      const el = this;
+      if(el.hasAttribute('data-label-id')) return; // already paired
+      // 1) Name match (id/title/data-name vs label text)
+      const titleEl = el.querySelector && el.querySelector('title');
+      const rawName = (el.getAttribute('data-name') || (titleEl && titleEl.textContent) || el.id || '').trim();
+      const norm = s => (s||'').toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu,'').replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
+      const key = norm(rawName);
+      if(key){
+        const match = labelNodes.find(L => norm(L.node.textContent) === key);
+        if(match){ el.setAttribute('data-label-id', match.id); return; }
+      }
+      // 2) Inside test
+      const inside = labelNodes.find(L => labelInsideShape(L.screen, el));
+      if(inside){ el.setAttribute('data-label-id', inside.id); return; }
+      // 3) Nearest
+      const pc = centerInScreen(el);
+      let best = null, bestD = Infinity;
+      for(const L of labelNodes){ const dx = L.screen.x - pc.x, dy = L.screen.y - pc.y; const d2 = dx*dx + dy*dy; if(d2 < bestD){ bestD = d2; best = L; } }
       if(best){ el.setAttribute('data-label-id', best.id); }
     });
 
+    // Interaction
     function togglePark(el){
       const park = d3.select(el);
       const label = d3.select('#' + park.attr('data-label-id'));
@@ -188,19 +234,22 @@
       label.classed('active', !isActive);
     }
 
-    shapes.on('click', (event)=> togglePark(event.currentTarget));
-    shapes.on('keydown', (event)=>{ if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); togglePark(event.currentTarget); } });
+    parksSel.on('click', (event)=> togglePark(event.currentTarget));
+    parksSel.on('keydown', (event)=>{ if(event.key === 'Enter' || event.key === ' '){ event.preventDefault(); togglePark(event.currentTarget); } });
 
+    // Zoom/pan (1x–4x)
     const zoom = d3.zoom().scaleExtent([1,4]).on('zoom', (event)=>{ viewport.attr('transform', event.transform); });
     svg.call(zoom);
 
+    // Reset
     resetBtn.addEventListener('click', ()=>{
       svg.transition().duration(250).call(zoom.transform, d3.zoomIdentity);
       d3.selectAll('.park.active').classed('active', false);
       d3.selectAll('text.label.active').classed('active', false);
     });
 
-    shapes.on('dblclick', (event)=>{
+    // Double-click to zoom to a park
+    parksSel.on('dblclick', (event)=>{
       event.preventDefault();
       const node = event.currentTarget; const bbox = node.getBBox();
       const {width, height} = svg.node().getBoundingClientRect();
